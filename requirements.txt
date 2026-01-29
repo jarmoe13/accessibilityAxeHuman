@@ -1,0 +1,6 @@
+streamlit
+selenium
+anthropic
+pandas
+plotly
+requests
