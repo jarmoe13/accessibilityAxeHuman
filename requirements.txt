@@ -4,4 +4,4 @@ anthropic
 pandas
 plotly
 requests
-matplotlib  <-- TO MUSISZ DODAĆ
+matplotlib
