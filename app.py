@@ -6,11 +6,12 @@ import plotly.express as px
 from datetime import datetime
 import time
 import shutil
+import tempfile
+from pathlib import Path
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Lyreco Accessibility Monitor", layout="wide")
@@ -88,51 +89,95 @@ def safe_float(value):
 
 def build_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--window-size=1920x1080")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
 
-    chromedriver_path = shutil.which("chromedriver")
-    if chromedriver_path:
-        service = Service(chromedriver_path)
-        return webdriver.Chrome(service=service, options=chrome_options)
+    service = Service(executable_path=shutil.which("chromedriver") or "/usr/bin/chromedriver")
+    chrome_options.binary_location = shutil.which("chromium") or "/usr/bin/chromium"
 
-    return webdriver.Chrome(options=chrome_options)
+    return webdriver.Chrome(service=service, options=chrome_options)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def run_axe_test(url, max_retries=2):
-    for attempt in range(max_retries + 1):
+# --- AXE-CORE TEST ---
+AXE_CORE_URLS = [
+    "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.7.2/axe.min.js",
+    "https://cdn.jsdelivr.net/npm/axe-core@4.7.2/axe.min.js",
+    "https://unpkg.com/axe-core@4.7.2/axe.min.js",
+]
+
+
+def run_axe_test(url, retries=2):
+    """Run axe-core accessibility test using Selenium."""
+    for attempt in range(1, retries + 1):
         driver = None
         try:
             driver = build_driver()
             driver.get(url)
-            time.sleep(2)
+            time.sleep(3)
 
-            driver.execute_script(
-                """
-                return new Promise((resolve, reject) => {
+            load_error = None
+            for script_url in AXE_CORE_URLS:
+                result = driver.execute_async_script(
+                    """
+                    const url = arguments[0];
+                    const callback = arguments[arguments.length - 1];
+                    if (window.axe) {
+                        callback({loaded: true});
+                        return;
+                    }
                     const script = document.createElement('script');
-                    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.7.2/axe.min.js';
-                    script.onload = () => resolve(true);
-                    script.onerror = () => reject(new Error('Failed to load axe-core'));
+                    script.src = url;
+                    script.onload = () => callback({loaded: true});
+                    script.onerror = () => callback({loaded: false, error: `Failed to load ${url}`});
                     document.head.appendChild(script);
-                });
+                    """,
+                    script_url,
+                )
+                if isinstance(result, dict) and result.get("loaded"):
+                    load_error = None
+                    break
+                load_error = result.get("error") if isinstance(result, dict) else "Failed to load axe-core"
+
+            if load_error:
+                raise RuntimeError(load_error)
+
+            results = driver.execute_async_script(
+                """
+                const callback = arguments[arguments.length - 1];
+                if (!window.axe) {
+                    callback({error: 'axe-core not loaded'});
+                    return;
+                }
+                axe.run()
+                    .then((res) => callback(res))
+                    .catch((err) => callback({error: err.toString()}));
                 """
             )
 
-            time.sleep(1)
-            results = driver.execute_script("return axe.run();")
+            if isinstance(results, dict) and results.get("error"):
+                raise RuntimeError(results["error"])
 
-            violations = results.get("violations", [])
-            passes = results.get("passes", [])
+            violations = results.get("violations", []) if isinstance(results, dict) else []
 
             critical = sum(1 for v in violations if v.get("impact") == "critical")
             serious = sum(1 for v in violations if v.get("impact") == "serious")
             moderate = sum(1 for v in violations if v.get("impact") == "moderate")
             minor = sum(1 for v in violations if v.get("impact") == "minor")
+            critical_screenshot = ""
+
+            if critical > 0:
+                temp_dir = Path(tempfile.gettempdir())
+                screenshot_path = temp_dir / f"axe_critical_{int(time.time())}.png"
+                if driver.save_screenshot(str(screenshot_path)):
+                    critical_screenshot = str(screenshot_path)
 
             return {
                 "total_violations": len(violations),
@@ -140,117 +185,151 @@ def run_axe_test(url, max_retries=2):
                 "serious": serious,
                 "moderate": moderate,
                 "minor": minor,
-                "passes": len(passes),
                 "violations_details": violations[:5],
-                "error": "",
+                "critical_screenshot": critical_screenshot,
+                "error": None,
             }
         except Exception as exc:
-            if attempt >= max_retries:
+            if attempt == retries:
                 return {
                     "total_violations": 0,
                     "critical": 0,
                     "serious": 0,
                     "moderate": 0,
                     "minor": 0,
-                    "passes": 0,
                     "violations_details": [],
-                    "error": str(exc),
+                    "critical_screenshot": "",
+                    "error": str(exc)[:120],
                 }
+            time.sleep(1)
         finally:
             if driver:
                 driver.quit()
 
 
-def calculate_component_scores(lh_pct, w_err, w_con, axe_critical, axe_serious, axe_available):
+def calculate_component_scores(lh_pct, w_err, w_con, axe_critical, axe_serious):
     lh_score = safe_float(lh_pct)
     wave_penalty = (safe_int(w_err) * 1.2) + (safe_int(w_con) * 0.5)
     wave_score = max(0.0, 100 - wave_penalty)
-
-    if axe_available:
-        axe_penalty = (safe_int(axe_critical) * 10) + (safe_int(axe_serious) * 5)
-        axe_score = max(0.0, 100 - axe_penalty)
-    else:
-        axe_score = None
-
+    axe_penalty = (safe_int(axe_critical) * 10) + (safe_int(axe_serious) * 5)
+    axe_score = max(0.0, 100 - axe_penalty)
     return lh_score, wave_score, axe_score
 
 
-def calculate_weighted_score(lh_score, wave_score, axe_score):
-    weights = {"lh": 0.4, "wave": 0.3, "axe": 0.3}
-    total_weight = weights["lh"] + weights["wave"] + (weights["axe"] if axe_score is not None else 0)
+def calculate_weighted_score(lh_score, wave_score, axe_score, axe_available=True):
+    weights = {
+        "lighthouse": 0.4,
+        "wave": 0.3,
+        "axe": 0.3,
+    }
 
+    if not axe_available:
+        weights["axe"] = 0.0
+
+    total_weight = sum(weights.values())
     if total_weight == 0:
         return 0.0
 
-    weighted_sum = (lh_score * weights["lh"]) + (wave_score * weights["wave"])
-    if axe_score is not None:
-        weighted_sum += axe_score * weights["axe"]
+    normalized = {key: value / total_weight for key, value in weights.items()}
 
-    return round(weighted_sum / total_weight, 1)
+    return round(
+        (lh_score * normalized["lighthouse"])
+        + (wave_score * normalized["wave"])
+        + (axe_score * normalized["axe"]),
+        1,
+    )
 
 
-def generate_recommendations(score, w_err, w_con, aria_issues, alt_issues, axe_critical, axe_serious):
+def generate_recommendations(score, wave_errors, contrast, axe_critical, axe_serious, axe_error):
     recommendations = []
 
+    def add(priority, text):
+        recommendations.append((priority, text))
+
+    if axe_error:
+        add(
+            4,
+            "⚠️ Axe-core jest niestabilny — wynik nie został wliczony do score.",
+        )
+
     if axe_critical > 0:
-        recommendations.append(f"🔴 CRITICAL: Fix {axe_critical} critical axe-core violations")
+        add(
+            0,
+            f"🔴 KRYTYCZNE: Napraw {axe_critical} błędów, które blokują użycie strony "
+            "(WCAG 2.1 A/AA, axe-core).",
+        )
 
     if axe_serious > 0:
-        recommendations.append(f"🟠 HIGH: Resolve {axe_serious} serious axe-core violations")
+        add(
+            1,
+            f"🟠 WYSOKIE: Usuń {axe_serious} poważnych błędów, które utrudniają korzystanie "
+            "(WCAG 2.1 A/AA, axe-core).",
+        )
 
-    if aria_issues > 0:
-        recommendations.append(f"🔴 CRITICAL: Fix {aria_issues} ARIA issues")
+    if contrast > 10:
+        add(
+            1,
+            f"🟡 WYSOKIE: Popraw kontrast w {contrast} miejscach — tekst powinien być czytelny "
+            "(WCAG 1.4.3).",
+        )
+    elif contrast > 0:
+        add(
+            2,
+            f"🟡 ŚREDNIE: Ulepsz kontrast w {contrast} miejscach, żeby tekst był łatwy do odczytania "
+            "(WCAG 1.4.3).",
+        )
 
-    if alt_issues > 0:
-        recommendations.append(f"🔴 CRITICAL: Add alt text to {alt_issues} images")
-
-    if w_con > 10:
-        recommendations.append(f"🟡 HIGH: Fix {w_con} contrast issues (WCAG AA)")
-    elif w_con > 0:
-        recommendations.append(f"🟡 MEDIUM: Improve {w_con} contrast ratios")
-
-    if w_err > 20:
-        recommendations.append(f"🔴 HIGH: {w_err} accessibility errors detected")
-    elif w_err > 5:
-        recommendations.append(f"🟡 MEDIUM: {w_err} errors need attention")
+    if wave_errors > 20:
+        add(
+            1,
+            f"🔴 WYSOKIE: Wykryto {wave_errors} błędów dostępności — warto je poprawić w pierwszej "
+            "kolejności (WCAG 2.1 A/AA).",
+        )
+    elif wave_errors > 5:
+        add(
+            2,
+            f"🟡 ŚREDNIE: Jest {wave_errors} błędów dostępności — zaplanuj poprawki w tym sprincie "
+            "(WCAG 2.1 A/AA).",
+        )
 
     if score < 60:
-        recommendations.append("⚠️ ACTION REQUIRED: Critical barriers present")
+        add(0, "⚠️ PILNE: Są bariery, które mogą całkiem blokować użytkowników.")
     elif score < 80:
-        recommendations.append("📋 PLAN: Schedule fixes in next sprint")
+        add(3, "📋 PLAN: Zaplanuj poprawki w następnym sprincie.")
     elif score >= 90:
-        recommendations.append("✅ MAINTAIN: Monitor for regressions")
+        add(4, "✅ OK: Monitoruj, żeby nie pojawiły się regresje.")
 
-    return recommendations if recommendations else ["✅ No major issues detected"]
+    recommendations.sort(key=lambda item: item[0])
+    ordered = [text for _, text in recommendations]
+    return ordered if ordered else ["✅ Brak dużych problemów."]
 
 
+# --- MAIN AUDIT FUNCTION ---
 def run_audit(url, page_type, country, deploy_version="", run_axe=True):
     lh_val = 0.0
     err = 0
     con = 0
-    aria_issues = 0
-    alt_issues = 0
-    failed_audits = []
-
     axe_critical = 0
     axe_serious = 0
     axe_total = 0
-    axe_error = ""
+    axe_error = None
+    axe_critical_screenshot = ""
+    failed_audits = []
 
-    # Lighthouse
+    # === LIGHTHOUSE ===
     try:
         url_enc = urllib.parse.quote(url)
         lh_api = (
-            "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-            f"?url={url_enc}&category=accessibility&onlyCategories=accessibility"
-            f"&strategy=desktop&key={GOOGLE_KEY}"
+            "https://www.googleapis.com/pagespeedonline/v5/runPagespeed?"
+            f"url={url_enc}&category=accessibility&onlyCategories=accessibility&"
+            f"strategy=desktop&key={GOOGLE_KEY}"
         )
         r_lh = requests.get(lh_api, timeout=45)
 
         if r_lh.status_code == 200:
-            d = r_lh.json()
+            data = r_lh.json()
             score_value = (
-                d.get("lighthouseResult", {})
+                data.get("lighthouseResult", {})
                 .get("categories", {})
                 .get("accessibility", {})
                 .get("score")
@@ -258,83 +337,77 @@ def run_audit(url, page_type, country, deploy_version="", run_axe=True):
             if score_value is not None:
                 lh_val = float(score_value) * 100
 
-            audits = d.get("lighthouseResult", {}).get("audits", {})
+            audits = data.get("lighthouseResult", {}).get("audits", {})
             for audit_id, audit_data in audits.items():
                 score_val = audit_data.get("score", 1)
                 if score_val is not None and score_val < 1:
                     title = audit_data.get("title", "Unknown")
                     failed_audits.append(title)
-                    if "aria" in audit_id.lower():
-                        aria_issues += 1
-                    if "image-alt" in audit_id or "alt" in str(title).lower():
-                        alt_issues += 1
     except Exception as exc:
         st.warning(f"⚠️ Lighthouse error: {str(exc)[:80]}")
 
-    # WAVE
+    # === WAVE ===
     try:
         wave_api = f"https://wave.webaim.org/api/request?key={WAVE_KEY}&url={url}"
         r_w = requests.get(wave_api, timeout=35)
 
         if r_w.status_code == 200:
-            dw = r_w.json()
-            if "categories" in dw:
-                if "error" in dw["categories"]:
-                    err = safe_int(dw["categories"]["error"].get("count"))
-                if "contrast" in dw["categories"]:
-                    con = safe_int(dw["categories"]["contrast"].get("count"))
+            data = r_w.json()
+            categories = data.get("categories", {})
+            err = safe_int(categories.get("error", {}).get("count"))
+            con = safe_int(categories.get("contrast", {}).get("count"))
     except Exception as exc:
         st.warning(f"⚠️ WAVE error: {str(exc)[:80]}")
 
-    # Axe-core
+    # === AXE-CORE ===
     if run_axe:
         axe_results = run_axe_test(url)
         axe_critical = axe_results["critical"]
         axe_serious = axe_results["serious"]
         axe_total = axe_results["total_violations"]
-        axe_error = axe_results.get("error", "")
-
-        if axe_error:
-            st.info(f"⚠️ Axe-core unavailable for {country} {page_type}: {axe_error[:80]}")
+        axe_error = axe_results["error"]
+        axe_critical_screenshot = axe_results.get("critical_screenshot", "")
 
     lh_score, wave_score, axe_score = calculate_component_scores(
-        lh_val, err, con, axe_critical, axe_serious, run_axe and not axe_error
-    )
-
-    score = calculate_weighted_score(lh_score, wave_score, axe_score)
-    recommendations = generate_recommendations(
-        score,
+        lh_val,
         err,
         con,
-        aria_issues,
-        alt_issues,
         axe_critical,
         axe_serious,
     )
+
+    score = calculate_weighted_score(
+        lh_score,
+        wave_score,
+        axe_score,
+        axe_available=not bool(axe_error),
+    )
+
+    recommendations = generate_recommendations(score, err, con, axe_critical, axe_serious, axe_error)
 
     return {
         "Country": str(country),
         "Page Type": str(page_type),
         "URL": str(url),
         "Score": float(score),
-        "Lighthouse": float(lh_val),
+        "Lighthouse": float(lh_score),
         "WAVE Errors": int(err),
         "Contrast Issues": int(con),
-        "ARIA Issues": int(aria_issues),
-        "Alt Text Issues": int(alt_issues),
         "Axe Critical": int(axe_critical),
         "Axe Serious": int(axe_serious),
         "Axe Total Violations": int(axe_total),
-        "Axe Error": axe_error,
+        "Axe Error": str(axe_error) if axe_error else "",
+        "Axe Critical Screenshot": str(axe_critical_screenshot) if axe_critical_screenshot else "",
         "Top Failed Audits": "; ".join(failed_audits[:3]) if failed_audits else "",
         "Recommendations": " | ".join(recommendations),
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "Deploy_Version": str(deploy_version) if deploy_version else "",
+        "Deploy Version": str(deploy_version) if deploy_version else "",
     }
 
 
+# --- DASHBOARD ---
 def display_dashboard(df):
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.metric("Average Score", f"{df['Score'].mean():.1f}")
@@ -343,8 +416,6 @@ def display_dashboard(df):
     with col3:
         st.metric("Axe Serious", int(df["Axe Serious"].sum()))
     with col4:
-        st.metric("ARIA Issues", int(df["ARIA Issues"].sum()))
-    with col5:
         st.metric("Contrast Issues", int(df["Contrast Issues"].sum()))
 
     st.divider()
@@ -389,7 +460,7 @@ def display_dashboard(df):
         "Axe Critical",
         "Axe Serious",
         "Contrast Issues",
-        "ARIA Issues",
+        "Axe Error",
     ]
     st.dataframe(filtered_df[display_cols], use_container_width=True)
 
@@ -403,11 +474,20 @@ def display_dashboard(df):
             with st.expander(f"⚠️ {row['Country']} - {row['Page Type']} (Score: {row['Score']:.1f})"):
                 st.markdown(f"**URL:** {row['URL']}")
                 st.markdown(
-                    f"**Lighthouse:** {row['Lighthouse']:.1f} | "
-                    f"**WAVE Errors:** {safe_int(row['WAVE Errors'])} | "
-                    f"**Axe Critical:** {safe_int(row['Axe Critical'])} | "
-                    f"**Axe Serious:** {safe_int(row['Axe Serious'])}"
+                    "**Lighthouse:** "
+                    f"{row['Lighthouse']:.1f} | "
+                    "**WAVE Errors:** "
+                    f"{safe_int(row['WAVE Errors'])} | "
+                    "**Axe Critical:** "
+                    f"{safe_int(row['Axe Critical'])} | "
+                    "**Axe Serious:** "
+                    f"{safe_int(row['Axe Serious'])}"
                 )
+                if row["Axe Error"]:
+                    st.warning(f"Axe-core error: {row['Axe Error']}")
+                if row.get("Axe Critical Screenshot"):
+                    st.markdown("**Podgląd strony z krytycznym błędem (screenshot):**")
+                    st.image(row["Axe Critical Screenshot"], use_container_width=True)
                 st.markdown("**Recommendations:**")
                 recs = str(row["Recommendations"]).split(" | ")
                 for i, rec in enumerate(recs, 1):
@@ -442,27 +522,25 @@ def display_dashboard(df):
     )
 
 
+# --- MAIN UI ---
 with st.sidebar:
-    st.image(
-        "https://cdn-s1.lyreco.com/staticswebshop/pictures/looknfeel/FRFR/logo.svg",
-        width=200,
-    )
+    st.image("https://cdn-s1.lyreco.com/staticswebshop/pictures/looknfeel/FRFR/logo.svg", width=200)
     st.divider()
     st.markdown("### 📊 About This Tool")
     st.markdown(
         """
-        Automated WCAG compliance monitoring for Lyreco e-commerce platforms.
+    Automated WCAG compliance monitoring for Lyreco e-commerce platforms.
 
-        **Powered by:**
-        - Google Lighthouse (40%)
-        - WAVE by WebAIM (30%)
-        - Axe-core (30%)
+    **Powered by:**
+    - Google Lighthouse (40%)
+    - WAVE by WebAIM (30%)
+    - Axe-core (30%)
 
-        **Coverage:**
-        - 6 countries
-        - 3 page types per country
-        - 100+ accessibility checks
-        """
+    **Coverage:**
+    - 1 country (pilot)
+    - 3 page types per country
+    - 100+ accessibility checks
+    """
     )
     st.divider()
     st.caption("Version 8.0 | January 2026")
@@ -524,6 +602,7 @@ with tab1:
             st.warning("Please select at least one country")
         else:
             results = []
+
             total_audits = 1 + (len(country_selection) * 3)
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -537,8 +616,9 @@ with tab1:
             for country in country_selection:
                 pages = COUNTRIES[country]
                 for page_type, url in pages.items():
-                    status_text.text(f"🔍 Auditing {country} - {PAGE_LABELS.get(page_type, page_type)}...")
-                    results.append(run_audit(url, PAGE_LABELS.get(page_type, page_type), country, deploy_version, run_axe_tests))
+                    label = PAGE_LABELS.get(page_type, page_type)
+                    status_text.text(f"🔍 Auditing {country} - {label}...")
+                    results.append(run_audit(url, label, country, deploy_version, run_axe_tests))
                     current += 1
                     progress_bar.progress(current / total_audits)
 
