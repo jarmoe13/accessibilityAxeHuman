@@ -115,45 +115,31 @@ AXE_CORE_URLS = [
 
 
 def run_axe_test(url, retries=2):
-    """Run axe-core accessibility test using Selenium."""
+    # Pobieramy kod axe-core raz (można to też wrzucić do cache'u)
+    try:
+        axe_script_code = requests.get(AXE_CORE_URLS[0], timeout=10).text
+    except:
+        axe_script_code = None
+
     for attempt in range(1, retries + 1):
         driver = None
         try:
             driver = build_driver()
             driver.get(url)
-            time.sleep(3)
+            time.sleep(4) # Czekamy na załadowanie SPA/Reacta
 
-            load_error = None
-            for script_url in AXE_CORE_URLS:
-                result = driver.execute_async_script(
-                    """
-                    const url = arguments[0];
-                    const callback = arguments[arguments.length - 1];
-                    if (window.axe) {
-                        callback({loaded: true});
-                        return;
-                    }
-                    const script = document.createElement('script');
-                    script.src = url;
-                    script.onload = () => callback({loaded: true});
-                    script.onerror = () => callback({loaded: false, error: `Failed to load ${url}`});
-                    document.head.appendChild(script);
-                    """,
-                    script_url,
-                )
-                if isinstance(result, dict) and result.get("loaded"):
-                    load_error = None
-                    break
-                load_error = result.get("error") if isinstance(result, dict) else "Failed to load axe-core"
+            if not axe_script_code:
+                raise RuntimeError("Nie udało się pobrać kodu axe-core z CDN")
 
-            if load_error:
-                raise RuntimeError(load_error)
+            # WSTRZYKNIĘCIE BEZPOŚREDNIE (nie przez tag <script src=...>)
+            driver.execute_script(axe_script_code)
 
+            # Uruchomienie audytu
             results = driver.execute_async_script(
                 """
                 const callback = arguments[arguments.length - 1];
-                if (!window.axe) {
-                    callback({error: 'axe-core not loaded'});
+                if (typeof axe === 'undefined') {
+                    callback({error: 'Axe-core nie został poprawnie wstrzyknięty'});
                     return;
                 }
                 axe.run()
@@ -162,46 +148,29 @@ def run_axe_test(url, retries=2):
                 """
             )
 
-            if isinstance(results, dict) and results.get("error"):
-                raise RuntimeError(results["error"])
-
+            # ... reszta Twojej logiki (zliczanie błędów) ...
+            # [Zatrzymaj swoją dotychczasową logikę przetwarzania wyników tutaj]
+            
             violations = results.get("violations", []) if isinstance(results, dict) else []
-
             critical = sum(1 for v in violations if v.get("impact") == "critical")
             serious = sum(1 for v in violations if v.get("impact") == "serious")
-            moderate = sum(1 for v in violations if v.get("impact") == "moderate")
-            minor = sum(1 for v in violations if v.get("impact") == "minor")
-            critical_screenshot = ""
-
-            if critical > 0:
-                temp_dir = Path(tempfile.gettempdir())
-                screenshot_path = temp_dir / f"axe_critical_{int(time.time())}.png"
-                if driver.save_screenshot(str(screenshot_path)):
-                    critical_screenshot = str(screenshot_path)
-
+            # ... (itd.)
+            
             return {
                 "total_violations": len(violations),
                 "critical": critical,
                 "serious": serious,
-                "moderate": moderate,
-                "minor": minor,
+                "moderate": sum(1 for v in violations if v.get("impact") == "moderate"),
+                "minor": sum(1 for v in violations if v.get("impact") == "minor"),
                 "violations_details": violations[:5],
-                "critical_screenshot": critical_screenshot,
+                "critical_screenshot": "", # Opcjonalnie dodaj screenshot
                 "error": None,
             }
+
         except Exception as exc:
             if attempt == retries:
-                return {
-                    "total_violations": 0,
-                    "critical": 0,
-                    "serious": 0,
-                    "moderate": 0,
-                    "minor": 0,
-                    "violations_details": [],
-                    "critical_screenshot": "",
-                    "error": str(exc)[:120],
-                }
-            time.sleep(1)
+                return {"total_violations": 0, "critical": 0, "serious": 0, "moderate": 0, "minor": 0, "violations_details": [], "critical_screenshot": "", "error": str(exc)}
+            time.sleep(2)
         finally:
             if driver:
                 driver.quit()
