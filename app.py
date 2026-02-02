@@ -233,7 +233,7 @@ def display_dashboard(df):
                     st.markdown(f"**{impact_color.get(v['impact'])} {v['impact'].upper()}**: {v['help']}")
                     st.caption(f"Target: `{v['wcag_tag']}` | ID: `{v['id']}`")
                     with st.indent():
-                        st.write(v["description"])
+                       st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;*{v['description']}*")
 
 # --- MAIN APP ---
 st.title("🛡️ Lyreco Accessibility Agent")
