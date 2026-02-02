@@ -60,15 +60,29 @@ PAGE_LABELS = {"home": "Home", "category": "Category", "product": "Product", "lo
 
 # --- SIDEBAR (OLD UI STYLE) ---
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/1a/Lyreco_logo.svg/1200px-Lyreco_logo.svg.png", width=200)
-    st.title("WCAG Auditor")
-    st.markdown("""
-    Internal tool for monitoring accessibility compliance across Lyreco's digital ecosystem.
-    
-    **Engine:** - Lighthouse 10.0
-    - WAVE API 
-    - Axe-core 4.7
-    """)
+    st.image("https://cdn-s1.lyreco.com/staticswebshop/pictures/looknfeel/FRFR/logo.svg", width=200)
+    st.divider()
+    st.markdown("### 📊 About This Tool")
+    st.markdown(
+        """
+    Automated WCAG compliance monitoring for Lyreco e-commerce platforms.
+
+    **Powered by:**
+    - Google Lighthouse (40%)
+    - WAVE by WebAIM (30%)
+    - Axe-core (30%)
+
+    **Coverage:**
+    - 1 country (pilot)
+    - 3 page types per country
+    - 100+ accessibility checks
+    """
+    )
+    st.divider()
+    st.caption("Version 8.0 | January 2026")
+
+st.title("Lyreco Accessibility Monitor")
+st.caption("Multi-country WCAG compliance tracking with Axe-core")
     st.divider()
 
 # --- UTILS ---
@@ -199,7 +213,43 @@ def display_dashboard(df):
                     st.write(f"*{v['description']}*")
 
 # --- MAIN APP LAYOUT ---
-st.title("🛡️ Lyreco Digital Accessibility Monitor")
+st.title("Lyreco Digital Accessibility Monitor")
+
+with st.expander("📊 How We Calculate Accessibility Score"):
+    st.markdown(
+        """
+        ### Lyreco Accessibility Score (0-100)
+
+        **New Formula (v8.0):**
+
+        **🔍 Google Lighthouse (40%)**
+        - Tests 40+ accessibility rules
+        - Checks ARIA, semantic HTML, keyboard navigation
+
+        **🌊 WAVE by WebAIM (30%)**
+        - Detects critical errors (missing alt text, broken forms)
+        - Color contrast failures
+        - Penalties: 1.2 points per error, 0.5 per contrast issue
+
+        **⚡ Axe-core (30%)**
+        - Deep WCAG 2.1 compliance testing
+        - Heavy penalties: Critical violation = -10 points, Serious = -5 points
+        - Industry-standard tool used by Microsoft, Google, Adobe
+
+        **📈 Score Ranges:**
+        - 🟢🟢 95-100: Excellent
+        - 🟢 90-95: Good
+        - 🟡🟢 80-90: Fair
+        - 🟡 60-80: Needs improvement
+        - 🔴 <60: Critical issues
+
+        ⚠️ *Automated tools catch ~70% of issues. Manual testing required for full compliance.*
+        """
+    )
+
+st.divider()
+
+
 
 tab1, tab2 = st.tabs(["🚀 New Audit", "📂 History"])
 
