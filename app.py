@@ -223,8 +223,6 @@ with st.sidebar:
 st.title("Lyreco Accessibility Monitor")
 st.caption("Multi-country WCAG compliance tracking with Axe-core")
 
-tab1, tab2 = st.tabs(["🚀 New Audit", "📂 History"])
-
 with st.expander("📊 How We Calculate Accessibility Score"):
     st.markdown(
         """
@@ -258,6 +256,7 @@ with st.expander("📊 How We Calculate Accessibility Score"):
     )
 
 st.divider()
+tab1, tab2 = st.tabs(["🚀 New Audit", "📂 History"])
 
 with tab1:
     with st.expander("Audit Settings", expanded=True):
