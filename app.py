@@ -83,7 +83,7 @@ with st.sidebar:
 
 st.title("Lyreco Accessibility Monitor")
 st.caption("Multi-country WCAG compliance tracking with Axe-core")
-    st.divider()
+
 
 # --- UTILS ---
 def build_driver():
