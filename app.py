@@ -237,3 +237,37 @@ if check_password():
         if up: 
             df = pd.read_csv(up)
             display_results(df)
+
+with st.expander("📊 How We Calculate Accessibility Score"):
+    st.markdown(
+        """
+        ### Lyreco Accessibility Score (0-100)
+
+        **New Formula (v8.0):**
+
+        **🔍 Google Lighthouse (40%)**
+        - Tests 40+ accessibility rules
+        - Checks ARIA, semantic HTML, keyboard navigation
+
+        **🌊 WAVE by WebAIM (30%)**
+        - Detects critical errors (missing alt text, broken forms)
+        - Color contrast failures
+        - Penalties: 1.2 points per error, 0.5 per contrast issue
+
+        **⚡ Axe-core (30%)**
+        - Deep WCAG 2.1 compliance testing
+        - Heavy penalties: Critical violation = -10 points, Serious = -5 points
+        - Industry-standard tool used by Microsoft, Google, Adobe
+
+        **📈 Score Ranges:**
+        - 🟢🟢 95-100: Excellent
+        - 🟢 90-95: Good
+        - 🟡🟢 80-90: Fair
+        - 🟡 60-80: Needs improvement
+        - 🔴 <60: Critical issues
+
+        ⚠️ *Automated tools catch ~70% of issues. Manual testing required for full compliance.*
+        """
+    )
+
+st.divider()
