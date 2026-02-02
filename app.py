@@ -291,7 +291,7 @@ with st.expander("How We Calculate Accessibility Score"):
 
 st.divider()
 
-    tab1, tab2 = st.tabs(["🚀 New Audit", "📂 History"])
+tab1, tab2 = st.tabs(["🚀 New Audit", "📂 History"])
 
     with tab1:
         with st.expander("Audit Settings", expanded=True):
