@@ -6,9 +6,11 @@ from datetime import datetime
 import time
 import shutil
 import tempfile
+import os
 from pathlib import Path
 import anthropic
 import ast 
+from fpdf import FPDF # 👈 Nowa biblioteka do PDF
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -84,6 +86,136 @@ COUNTRIES = {
 SSO_LOGIN = "https://welcome.lyreco.com/lyreco-customers/login"
 PAGE_LABELS = {"home": "Home", "category": "Category", "product": "Product", "login": "Login (SSO)"}
 
+# --- PDF GENERATOR (W3C Style) ---
+class PDFReport(FPDF):
+    def header(self):
+        # Logo handling
+        try:
+            # Check if logo exists locally, if not try to download (or skip)
+            # For this demo, we assume we can't easily download in header loop without caching
+            # so we will use a text header mainly, or handle logo in the main body.
+            pass
+        except: pass
+        
+        self.set_font('Arial', 'B', 10)
+        self.set_text_color(100, 100, 100)
+        self.cell(0, 10, 'Lyreco Accessibility Audit Report', 0, 1, 'R')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.set_text_color(128)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+    def chapter_title(self, label):
+        self.set_font('Arial', 'B', 16)
+        self.set_text_color(45, 46, 135) # Lyreco Blue
+        self.cell(0, 10, label, 0, 1, 'L')
+        self.ln(4)
+
+    def chapter_body(self, text):
+        self.set_font('Arial', '', 11)
+        self.set_text_color(0)
+        self.multi_cell(0, 6, text)
+        self.ln()
+
+def generate_w3c_pdf(df):
+    pdf = PDFReport()
+    pdf.add_page()
+    
+    # 1. HEADER & LOGO
+    # Download logo to temp file for PDF inclusion
+    logo_path = "lyreco_logo.png"
+    try:
+        if not os.path.exists(logo_path):
+            img_data = requests.get("https://cdn-s1.lyreco.com/staticswebshop/pictures/looknfeel/FRFR/logo.png").content
+            with open(logo_path, 'wb') as handler:
+                handler.write(img_data)
+        pdf.image(logo_path, x=10, y=8, w=40)
+    except: pass
+    
+    pdf.ln(20)
+    pdf.set_font('Arial', 'B', 24)
+    pdf.cell(0, 15, "Accessibility Evaluation Report", 0, 1, 'L')
+    
+    pdf.set_font('Arial', '', 12)
+    pdf.cell(0, 8, f"Date: {datetime.now().strftime('%B %d, %Y')}", 0, 1, 'L')
+    pdf.cell(0, 8, f"Auditor: Lyreco Automated Agent (v8.0)", 0, 1, 'L')
+    pdf.ln(10)
+
+    # 2. EXECUTIVE SUMMARY
+    pdf.chapter_title("1. Executive Summary")
+    avg_score = df['Score'].mean()
+    
+    verdict = "Non-Compliant"
+    if avg_score >= 90: verdict = "Excellent Compliance"
+    elif avg_score >= 80: verdict = "Good Compliance"
+    elif avg_score >= 60: verdict = "Partial Compliance"
+    
+    summary_text = (
+        f"This report presents the results of an automated accessibility evaluation of the Lyreco e-commerce platform across selected markets. "
+        f"The overall accessibility score is {avg_score:.1f}/100, categorized as '{verdict}'. "
+        f"The evaluation highlights {int(df['Critical'].sum())} critical blockers and {int(df['Serious'].sum())} serious issues that require immediate attention to meet WCAG 2.1 AA standards."
+    )
+    pdf.chapter_body(summary_text)
+
+    # 3. SCOPE OF EVALUATION
+    pdf.chapter_title("2. Scope of Evaluation")
+    pdf.chapter_body("The following pages and markets were included in this audit:")
+    
+    pdf.set_font('Arial', 'B', 10)
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(40, 10, "Market", 1, 0, 'C', 1)
+    pdf.cell(40, 10, "Page Type", 1, 0, 'C', 1)
+    pdf.cell(110, 10, "URL (Truncated)", 1, 1, 'C', 1)
+    
+    pdf.set_font('Arial', '', 9)
+    for _, row in df.iterrows():
+        pdf.cell(40, 8, row['Country'], 1)
+        pdf.cell(40, 8, row['Type'], 1)
+        short_url = (row['URL'][:55] + '...') if len(row['URL']) > 55 else row['URL']
+        pdf.cell(110, 8, short_url, 1, 1)
+    pdf.ln(10)
+
+    # 4. DETAILED FINDINGS
+    pdf.chapter_title("3. Detailed Findings")
+    pdf.chapter_body("The following critical and serious violations were detected using Axe-core.")
+
+    for _, row in df.iterrows():
+        violations = row["Violations"]
+        if isinstance(violations, str):
+            try: violations = ast.literal_eval(violations)
+            except: violations = []
+        
+        # Filter for Critical/Serious only for the PDF to keep it clean
+        serious_violations = [v for v in violations if v.get('impact') in ['critical', 'serious']]
+        
+        if serious_violations:
+            pdf.set_font('Arial', 'B', 11)
+            pdf.set_text_color(45, 46, 135)
+            pdf.cell(0, 10, f"{row['Country']} - {row['Type']} (Score: {row['Score']})", 0, 1)
+            
+            pdf.set_font('Arial', 'B', 9)
+            pdf.set_text_color(0)
+            pdf.set_fill_color(220, 220, 220)
+            pdf.cell(30, 8, "Impact", 1, 0, 'C', 1)
+            pdf.cell(60, 8, "Issue ID", 1, 0, 'C', 1)
+            pdf.cell(100, 8, "Description", 1, 1, 'C', 1)
+            
+            pdf.set_font('Arial', '', 8)
+            for v in serious_violations:
+                impact = v.get('impact', 'minor').upper()
+                pdf.set_text_color(200, 0, 0) if impact == 'CRITICAL' else pdf.set_text_color(0)
+                pdf.cell(30, 8, impact, 1, 0, 'C')
+                
+                pdf.set_text_color(0)
+                pdf.cell(60, 8, v['id'], 1, 0)
+                pdf.cell(100, 8, v['help'], 1, 1)
+            pdf.ln(5)
+            
+    return pdf.output(dest='S').encode('latin-1', 'replace')
+
 # --- AUTHENTICATION SYSTEM ---
 def check_password():
     if "logged_in" not in st.session_state:
@@ -145,7 +277,6 @@ def fetch_axe():
     return requests.get("https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.7.2/axe.min.js").text
 
 def perform_full_audit(url, page_type, country):
-    # LH & WAVE Score calculation
     lh = 0
     try:
         r = requests.get(f"https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url={urllib.parse.quote(url)}&category=accessibility&key={GOOGLE_KEY}").json()
@@ -159,7 +290,6 @@ def perform_full_audit(url, page_type, country):
         w_con = r["categories"]["contrast"]["count"]
     except: pass
 
-    # Axe & Screenshot
     axe_data = {"violations": [], "counts": {"critical": 0, "serious": 0}}
     shot = ""
     driver = build_driver()
@@ -177,10 +307,7 @@ def perform_full_audit(url, page_type, country):
                 shot = tmp.name
     finally: driver.quit()
 
-    # --- SCORE CALCULATION (Formula V8.0) ---
     wave_s = max(0, 100 - (w_err * 2 + w_con * 0.5))
-    
-    # Adjusted penalties for V8.0 logic
     axe_s = max(0, 100 - (axe_data["counts"]["critical"] * 5 + axe_data["counts"]["serious"] * 2))
     
     final = round((lh * 0.4) + (wave_s * 0.3) + (axe_s * 0.3), 1)
@@ -199,11 +326,9 @@ def display_results(df):
     pivot = df.pivot_table(index="Country", columns="Type", values="Score")
     st.dataframe(pivot.style.background_gradient(cmap="RdYlGn", low=0.4, high=0.9), use_container_width=True)
 
-    # DETAILED TABLE
     st.subheader("❌ Detailed WCAG Violations")
     violation_rows = []
     for _, row in df.iterrows():
-        # Handle case where Violations might be stringified if loaded from CSV
         violations = row["Violations"]
         if isinstance(violations, str):
             try: violations = ast.literal_eval(violations)
@@ -265,14 +390,29 @@ if check_password():
         
         if "last_res" in st.session_state:
             st.divider()
+            
+            # 1. CSV Download
             csv = st.session_state["last_res"].to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Download Full Report (CSV)",
+                label="📥 Download Data (CSV)",
                 data=csv,
                 file_name=f"lyreco_audit_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime='text/csv',
                 use_container_width=True
             )
+            
+            # 2. PDF Download (NEW)
+            try:
+                pdf_bytes = generate_w3c_pdf(st.session_state["last_res"])
+                st.download_button(
+                    label="📄 Download Report (PDF)",
+                    data=pdf_bytes,
+                    file_name=f"Lyreco_W3C_Report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime='application/pdf',
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"PDF Gen Error: {e}")
             
         if st.button("Logout", use_container_width=True):
             st.session_state["logged_in"] = False
