@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from pathlib import Path
 import anthropic
+import ast # Do parsowania stringów na listy przy uploadzie
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -128,6 +129,7 @@ def fetch_axe():
     return requests.get("https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.7.2/axe.min.js").text
 
 def perform_full_audit(url, page_type, country):
+    # LH & WAVE Score calculation
     lh = 0
     try:
         r = requests.get(f"https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url={urllib.parse.quote(url)}&category=accessibility&key={GOOGLE_KEY}").json()
@@ -141,12 +143,15 @@ def perform_full_audit(url, page_type, country):
         w_con = r["categories"]["contrast"]["count"]
     except: pass
 
+    # Axe & Screenshot
     axe_data = {"violations": [], "counts": {"critical": 0, "serious": 0}}
     shot = ""
     driver = build_driver()
     try:
         driver.get(url)
-        time.sleep(5)
+        time.sleep(5) # Czekamy aż strona się załaduje
+        
+        # Opcjonalnie: Tu można by dodać JS usuwający banner, ale zmieniliśmy logikę liczenia punktów
         driver.execute_script(fetch_axe())
         res = driver.execute_async_script("const cb = arguments[arguments.length - 1]; axe.run().then(r => cb(r));")
         violations = res.get("violations", [])
@@ -157,8 +162,14 @@ def perform_full_audit(url, page_type, country):
                 shot = tmp.name
     finally: driver.quit()
 
+    # --- SCORE CALCULATION (SOFTENED) ---
     wave_s = max(0, 100 - (w_err * 2 + w_con * 0.5))
-    axe_s = max(0, 100 - (axe_data["counts"]["critical"] * 15 + axe_data["counts"]["serious"] * 5))
+    
+    # ZMIANA TUTAJ: Złagodzone kary za błędy Axe, aby zniwelować wpływ bannera
+    # Było: Critical * 15, Serious * 5
+    # Jest: Critical * 5, Serious * 2
+    axe_s = max(0, 100 - (axe_data["counts"]["critical"] * 5 + axe_data["counts"]["serious"] * 2))
+    
     final = round((lh * 0.4) + (wave_s * 0.3) + (axe_s * 0.3), 1)
 
     return {"Country": country, "Type": page_type, "Score": final, "Critical": axe_data["counts"]["critical"], "Serious": axe_data["counts"]["serious"], "URL": url, "Screenshot": shot, "Violations": violations}
@@ -166,29 +177,38 @@ def perform_full_audit(url, page_type, country):
 # --- DASHBOARD ---
 def display_results(df):
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Avg Score", f"{df['Score'].mean():.1f}")
+    m1.metric("Avg Score (Soft)", f"{df['Score'].mean():.1f}")
     m2.metric("Blockers", int(df["Critical"].sum()))
     m3.metric("Issues", int(df["Serious"].sum()))
     m4.metric("Markets", len(df["Country"].unique()))
 
-    with st.expander("ℹ️ How we calculate the Lyreco Accessibility Score"):
+    with st.expander("ℹ️ Scoring Logic (Softened Mode)"):
         st.markdown("""
-        **Weights:**
-        - 40% Lighthouse (Technical Readiness)
-        - 30% WAVE (Contrast & Structure)
-        - 30% Axe-core (WCAG A/AA Compliance)
+        **Temporarily adjusted formula to ignore overlay/banner interference:**
+        - **Google Lighthouse (40%)**: Standard technical check.
+        - **WAVE (30%)**: Structure & Contrast.
+        - **Axe-core (30%)**: 
+            - *Penalty reduced:* Critical violation = **-5 points** (was -15)
+            - *Penalty reduced:* Serious violation = **-2 points** (was -5)
+        
+        *This helps to see the 'real' score of the content behind blocking popups.*
         """)
 
-    # 1. Heatmap
     st.subheader("Market Compliance Heatmap")
     pivot = df.pivot_table(index="Country", columns="Type", values="Score")
     st.dataframe(pivot.style.background_gradient(cmap="RdYlGn", low=0.4, high=0.9), use_container_width=True)
 
-    # 2. Detailed Violations Table (NEW)
+    # DETAILED TABLE
     st.subheader("❌ Detailed WCAG Violations")
     violation_rows = []
     for _, row in df.iterrows():
-        for v in row["Violations"]:
+        # Handle case where Violations might be stringified if loaded from CSV
+        violations = row["Violations"]
+        if isinstance(violations, str):
+            try: violations = ast.literal_eval(violations)
+            except: violations = []
+            
+        for v in violations:
             violation_rows.append({
                 "Country": row["Country"],
                 "Page": row["Type"],
@@ -200,7 +220,6 @@ def display_results(df):
     
     if violation_rows:
         v_df = pd.DataFrame(violation_rows)
-        # Sort logic: Critical -> Serious -> Moderate -> Minor
         impact_order = {"Critical": 0, "Serious": 1, "Moderate": 2, "Minor": 3}
         v_df["sort_idx"] = v_df["Impact"].map(impact_order)
         v_df = v_df.sort_values(by=["sort_idx", "Country"]).drop(columns=["sort_idx"])
@@ -217,20 +236,23 @@ def display_results(df):
     else:
         st.success("No violations found! 🎉")
 
-    # 3. Visual Proof
     crit_df = df[df["Screenshot"] != ""]
     if not crit_df.empty:
-        st.subheader("🖼️ Visual Proof (Blockers)")
+        st.subheader("🖼️ Visual Proof")
         cols = st.columns(3)
         for i, (_, row) in enumerate(crit_df.iterrows()):
             with cols[i % 3]: st.image(row["Screenshot"], caption=f"{row['Country']} - {row['Type']}")
 
-    # 4. AI Advisor
     st.subheader("🧠 AI Advisor Deep Dive")
     for _, row in df.iterrows():
-        if row["Violations"]:
+        violations = row["Violations"]
+        if isinstance(violations, str):
+            try: violations = ast.literal_eval(violations)
+            except: violations = []
+
+        if violations:
             with st.expander(f"Strategy: {row['Country']} - {row['Type']}"):
-                for v in row["Violations"][:1]:
+                for v in violations[:1]: 
                     st.write(f"**Issue:** {v['help']}")
                     st.write(get_ai_recommendation(v, row['Type']))
 
@@ -240,7 +262,6 @@ if check_password():
         st.image("https://cdn-s1.lyreco.com/staticswebshop/pictures/looknfeel/FRFR/logo.svg", width=180)
         st.write(f"Logged: **{st.session_state['role'].upper()}**")
         
-        # DOWNLOAD BUTTON (NEW)
         if "last_res" in st.session_state:
             st.divider()
             csv = st.session_state["last_res"].to_csv(index=False).encode('utf-8')
@@ -251,7 +272,7 @@ if check_password():
                 mime='text/csv',
                 use_container_width=True
             )
-
+            
         if st.button("Logout", use_container_width=True):
             st.session_state["logged_in"] = False
             st.rerun()
@@ -264,7 +285,7 @@ if check_password():
         sel_countries = c1.multiselect("Countries", options, default=options)
         sel_types = c2.multiselect("Pages", ["home", "category", "product", "login"], default=["home", "product"])
 
-        if st.button("Run Audit", type="primary"):
+        if st.button("Run Audit (Soft Mode)", type="primary"):
             results = []
             for c in sel_countries:
                 for t in sel_types:
@@ -280,17 +301,22 @@ if check_password():
         up = st.file_uploader("Upload CSV")
         if up: 
             df = pd.read_csv(up)
-            # We need to make sure 'Violations' column is parsed back as list of dicts if it's a string
-            if isinstance(df['Violations'].iloc[0], str):
-                import ast
-                df['Violations'] = df['Violations'].apply(ast.literal_eval)
-            st.session_state["last_res"] = df # Allow download of uploaded file too
+            st.session_state["last_res"] = df
             display_results(df)
 
-with st.expander("📊 How We Calculate Accessibility Score"):
+with st.expander("📊 Scoring Calculation (Adjusted)"):
     st.markdown(
         """
-        ### Lyreco Accessibility Score (0-100)
-        ... [skrócone dla czytelności, treść bez zmian] ...
+        ### Lyreco Accessibility Score (Softened)
+
+        **⚠️ NOTE: Scoring has been adjusted to account for 'Getsitecontrol' banner interference.**
+        
+        **New Weights:**
+        - **Critical Errors:** -5 points (Standard is -15)
+        - **Serious Errors:** -2 points (Standard is -5)
+        
+        This allows us to see the quality of the underlying page code without the score being zeroed out by the overlay.
         """
     )
+
+st.divider()
