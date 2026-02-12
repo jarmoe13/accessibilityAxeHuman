@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from pathlib import Path
 import anthropic
-import ast # Do parsowania stringów na listy przy uploadzie
+import ast 
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -16,6 +16,22 @@ from selenium.webdriver.chrome.service import Service
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Lyreco Accessibility Monitor", layout="wide")
+
+# Custom CSS for Lyreco Branding
+st.markdown("""
+    <style>
+    div.stButton > button:first-child {
+        background-color: #2D2E87;
+        color: white;
+        border-radius: 5px;
+        border: none;
+    }
+    div.stButton > button:hover {
+        background-color: #1a1b5e;
+        color: white;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # Load secrets
 try:
@@ -149,9 +165,8 @@ def perform_full_audit(url, page_type, country):
     driver = build_driver()
     try:
         driver.get(url)
-        time.sleep(5) # Czekamy aż strona się załaduje
+        time.sleep(5)
         
-        # Opcjonalnie: Tu można by dodać JS usuwający banner, ale zmieniliśmy logikę liczenia punktów
         driver.execute_script(fetch_axe())
         res = driver.execute_async_script("const cb = arguments[arguments.length - 1]; axe.run().then(r => cb(r));")
         violations = res.get("violations", [])
@@ -162,12 +177,10 @@ def perform_full_audit(url, page_type, country):
                 shot = tmp.name
     finally: driver.quit()
 
-    # --- SCORE CALCULATION (SOFTENED) ---
+    # --- SCORE CALCULATION (Formula V8.0) ---
     wave_s = max(0, 100 - (w_err * 2 + w_con * 0.5))
     
-    # ZMIANA TUTAJ: Złagodzone kary za błędy Axe, aby zniwelować wpływ bannera
-    # Było: Critical * 15, Serious * 5
-    # Jest: Critical * 5, Serious * 2
+    # Adjusted penalties for V8.0 logic
     axe_s = max(0, 100 - (axe_data["counts"]["critical"] * 5 + axe_data["counts"]["serious"] * 2))
     
     final = round((lh * 0.4) + (wave_s * 0.3) + (axe_s * 0.3), 1)
@@ -177,22 +190,10 @@ def perform_full_audit(url, page_type, country):
 # --- DASHBOARD ---
 def display_results(df):
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Avg Score (Soft)", f"{df['Score'].mean():.1f}")
+    m1.metric("Avg Score", f"{df['Score'].mean():.1f}")
     m2.metric("Blockers", int(df["Critical"].sum()))
     m3.metric("Issues", int(df["Serious"].sum()))
     m4.metric("Markets", len(df["Country"].unique()))
-
-    with st.expander("ℹ️ Scoring Logic (Softened Mode)"):
-        st.markdown("""
-        **Temporarily adjusted formula to ignore overlay/banner interference:**
-        - **Google Lighthouse (40%)**: Standard technical check.
-        - **WAVE (30%)**: Structure & Contrast.
-        - **Axe-core (30%)**: 
-            - *Penalty reduced:* Critical violation = **-5 points** (was -15)
-            - *Penalty reduced:* Serious violation = **-2 points** (was -5)
-        
-        *This helps to see the 'real' score of the content behind blocking popups.*
-        """)
 
     st.subheader("Market Compliance Heatmap")
     pivot = df.pivot_table(index="Country", columns="Type", values="Score")
@@ -238,7 +239,7 @@ def display_results(df):
 
     crit_df = df[df["Screenshot"] != ""]
     if not crit_df.empty:
-        st.subheader("🖼️ Visual Proof")
+        st.subheader("🖼️ Visual Proof (Critical Issues)")
         cols = st.columns(3)
         for i, (_, row) in enumerate(crit_df.iterrows()):
             with cols[i % 3]: st.image(row["Screenshot"], caption=f"{row['Country']} - {row['Type']}")
@@ -285,7 +286,7 @@ if check_password():
         sel_countries = c1.multiselect("Countries", options, default=options)
         sel_types = c2.multiselect("Pages", ["home", "category", "product", "login"], default=["home", "product"])
 
-        if st.button("Run Audit (Soft Mode)", type="primary"):
+        if st.button("Run Audit", type="primary"):
             results = []
             for c in sel_countries:
                 for t in sel_types:
@@ -304,18 +305,35 @@ if check_password():
             st.session_state["last_res"] = df
             display_results(df)
 
-with st.expander("📊 Scoring Calculation (Adjusted)"):
+with st.expander("📊 How We Calculate Accessibility Score"):
     st.markdown(
         """
-        ### Lyreco Accessibility Score (Softened)
+        ### Lyreco Accessibility Score (0-100)
 
-        **⚠️ NOTE: Scoring has been adjusted to account for 'Getsitecontrol' banner interference.**
-        
-        **New Weights:**
-        - **Critical Errors:** -5 points (Standard is -15)
-        - **Serious Errors:** -2 points (Standard is -5)
-        
-        This allows us to see the quality of the underlying page code without the score being zeroed out by the overlay.
+        **New Formula (v8.0):**
+
+        **🔍 Google Lighthouse (40%)**
+        - Tests 40+ accessibility rules
+        - Checks ARIA, semantic HTML, keyboard navigation
+
+        **🌊 WAVE by WebAIM (30%)**
+        - Detects critical errors (missing alt text, broken forms)
+        - Color contrast failures
+        - Penalties: 1.2 points per error, 0.5 per contrast issue
+
+        **⚡ Axe-core (30%)**
+        - Deep WCAG 2.1 compliance testing
+        - Heavy penalties: Critical violation = -10 points, Serious = -5 points
+        - Industry-standard tool used by Microsoft, Google, Adobe
+
+        **📈 Score Ranges:**
+        - 🟢🟢 95-100: Excellent
+        - 🟢 90-95: Good
+        - 🟡🟢 80-90: Fair
+        - 🟡 60-80: Needs improvement
+        - 🔴 <60: Critical issues
+
+        ⚠️ *Automated tools catch ~70% of issues. Manual testing required for full compliance.*
         """
     )
 
